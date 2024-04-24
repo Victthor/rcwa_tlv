@@ -23,5 +23,8 @@ classifiers = [
 requires-python = ">=3.8.1"
 dynamic = ["version"]
 
+[project.urls]
+Homepage = "https://github.com/Victthor/rcwa_tlv"
+
 [tool.flit.module]
 name = "rcwa_tlv"
