@@ -19,9 +19,7 @@ Developer:
 ```python
 import numpy as np
 
-from rcwa_tlv.rcwa import RCWA
-from rcwa_tlv import Device
-from rcwa_tlv import Source
+from rcwa_tlv import RCWA, Device, Source
 from rcwa_tlv.devices.shapes import add_circle
 
 n_height = 400
