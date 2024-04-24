@@ -28,6 +28,9 @@ class RCWA:
         self.cdtype = np.complex128 if dtype == np.float64 else np.complex64
         self.idtype = np.int64 if dtype == np.float64 else np.int32
 
+        if apply_nv:
+            raise NotImplementedError("NV is not yet implemented.")
+
     def __call__(self, *args, **kwargs) -> dict:
         ur1 = self.device.ur1
         er1 = self.device.er1
@@ -289,13 +292,13 @@ if __name__ == '__main__':
 
     layer_1 = {
         'er': 1.0 * np.ones((n_height, n_width)),
-        'ur': 1.0 * np.ones((n_height, n_width)),
+        # 'ur': 1.0 * np.ones((n_height, n_width)),
         'length_z': 21,
     }
 
     layer_2 = {
         'er': 7.0 * np.ones((n_height, n_width)),
-        'ur': 1.0 * np.ones((n_height, n_width)),
+        # 'ur': 1.0 * np.ones((n_height, n_width)),
         'length_z': 54,
     }
 
