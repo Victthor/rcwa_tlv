@@ -31,13 +31,14 @@ class RCWA:
         if apply_nv:
             raise NotImplementedError("NV is not yet implemented.")
 
-    def __call__(self, *args, **kwargs) -> dict:
+    def __call__(self, *args, apply_nv=None, **kwargs) -> dict:
         ur1 = self.device.ur1
         er1 = self.device.er1
         ur2 = self.device.ur2
         er2 = self.device.er2
         gamma = self.gamma
         polarization_vec = self.source.polarization_vec
+        self.apply_nv = apply_nv if apply_nv is not None else self.apply_nv
 
         n_layers = len(self.device.layers)
         num_of_m = 1 + 2 * self.device.p  # x/width axis
@@ -81,11 +82,9 @@ class RCWA:
         er_inv_mat = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype)
         delta_mat = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype)
 
-        if self.apply_nv:
-            ...
-            # NVx_C = np.zeros((n_layers, np.count_nonzero(shape), np.count_nonzero(shape)))
-            # NVy_C = np.zeros((n_layers, np.count_nonzero(shape), np.count_nonzero(shape)))
-            # NVxy_C = np.zeros((n_layers, np.count_nonzero(shape), np.count_nonzero(shape)))
+        nvx_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
+        nvy_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
+        nvxy_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
 
         for i_layer in range(n_layers):
             er_temp = convmat(
@@ -99,13 +98,15 @@ class RCWA:
             delta_mat[i_layer, :, :] = er_c_mat[i_layer, :, :] - er_inv_mat[i_layer, :, :]
 
             if self.apply_nv:
-                ...
-                # NVxtemp = convmat(DEV['NVx'] ** 2, M, N)
-                # NVytemp = convmat(DEV['NVy'] ** 2, M, N)
-                # NVxytemp = convmat(DEV['NVx'] * DEV['NVy'], M, N)
-                # NVx_C[i_layer, :, :] = NVxtemp[shape, :][:, shape]
-                # NVy_C[i_layer, :, :] = NVytemp[shape, :][:, shape]
-                # NVxy_C[i_layer, :, :] = NVxytemp[shape, :][:, shape]
+                nvxtemp = convmat(self.device.layers[i_layer]['nv_x'] ** 2, num_of_m, num_of_n)
+                nvytemp = convmat(self.device.layers[i_layer]['nv_y'] ** 2, num_of_m, num_of_n)
+                nvxytemp = convmat(
+                    self.device.layers[i_layer]['nv_x'] * self.device.layers[i_layer]['nv_y'], num_of_m, num_of_n
+                )
+
+                nvx_c[i_layer, :, :] = nvxtemp[inxs, :][:, inxs]
+                nvy_c[i_layer, :, :] = nvytemp[inxs, :][:, inxs]
+                nvxy_c[i_layer, :, :] = nvxytemp[inxs, :][:, inxs]
 
         kx_mat = np.diag(kx[non_zero_rows, non_zero_cols] - maxk).astype(self.cdtype)
         ky_mat = np.diag(ky[non_zero_rows, non_zero_cols] - maxk).astype(self.cdtype)
@@ -166,16 +167,21 @@ class RCWA:
                     [ky_mat @ erky - i_mat, -ky_mat @ erkx]
                 ])
                 if self.apply_nv:
-                    ...
-                    # DeltaNxy = DELTA[i_layer] @ NVxy_C[i_layer]
-                    # Q[:, :, i_layer] = np.block([
-                    #     [Kx @ Ky - DeltaNxy, ER_C[i_layer] - DELTA[i_layer] @ NVy_C[i_layer] - Kx @ Kx],
-                    #     [Ky @ Ky - ER_C[i_layer] + DELTA[i_layer] @ NVx_C[i_layer], -Ky @ Kx + DeltaNxy]
-                    # ])
+                    delta_nxy = delta_mat[i_layer] @ nvxy_c[i_layer]
+                    q_mat[:, :, i_layer] = np.block([  # type:ignore
+                        [
+                            kx_mat @ ky_mat - delta_nxy,
+                            er_c_mat[i_layer] - delta_mat[i_layer] @ nvy_c[i_layer] - kx_mat @ kx_mat
+                        ],
+                        [
+                            ky_mat @ ky_mat - er_c_mat[i_layer] + delta_mat[i_layer] @ nvx_c[i_layer],
+                            -ky_mat @ kx_mat + delta_nxy
+                        ]
+                    ])
                 else:
                     q_mat[:, :, i_layer] = np.block([  # type:ignore
                         [kx_mat @ ky_mat, er_c_mat[i_layer] - kx_mat @ kx_mat],
-                        [ky_mat @ ky_mat - er_c_mat[i_layer], -kx_mat @ kx_mat]
+                        [ky_mat @ ky_mat - er_c_mat[i_layer], -ky_mat @ kx_mat]
                     ])
                 omega_2 = p_mat[:, :, i_layer] @ q_mat[:, :, i_layer]
                 lam, w_mat = np.linalg.eig(omega_2)
