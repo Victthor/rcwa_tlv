@@ -4,6 +4,7 @@ from scipy.linalg import expm
 from typing import Literal
 
 from rcwa_tlv.utils.convmat import convmat
+from rcwa_tlv.utils.normal_vector import calc_nv_fields
 from rcwa_tlv import Device, Source
 
 
@@ -28,8 +29,8 @@ class RCWA:
         self.cdtype = np.complex128 if dtype == np.float64 else np.complex64
         self.idtype = np.int64 if dtype == np.float64 else np.int32
 
-        if apply_nv:
-            raise NotImplementedError("NV is not yet implemented.")
+        # if apply_nv:
+        #     raise NotImplementedError("NV is not yet implemented.")
 
     def __call__(self, *args, apply_nv=None, **kwargs) -> dict:
         ur1 = self.device.ur1
@@ -39,6 +40,10 @@ class RCWA:
         gamma = self.gamma
         polarization_vec = self.source.polarization_vec
         self.apply_nv = apply_nv if apply_nv is not None else self.apply_nv
+
+        if self.apply_nv:
+            for layer in self.device.layers:
+                layer['nv_x'], layer['nv_y'] = calc_nv_fields(layer['er'])
 
         n_layers = len(self.device.layers)
         num_of_m = 1 + 2 * self.device.p  # x/width axis
@@ -57,14 +62,15 @@ class RCWA:
         n = np.arange(-self.device.q, self.device.q + 1)  # y/height axis
         kx = k_inc[0] - 2 * np.pi * m / (k0 * self.device.period_x)
         ky = k_inc[1] - 2 * np.pi * n / (k0 * self.device.period_y)
-        kx, ky = np.meshgrid(kx.astype(self.cdtype), ky.astype(self.cdtype))
+        # kx, ky = np.meshgrid(kx.astype(self.cdtype), ky.astype(self.cdtype))
+        ky, kx = np.meshgrid(ky.astype(self.cdtype), kx.astype(self.cdtype))
 
         # Compute kz in reflection and transmission regions
         kz_ref = np.conj((ur1 * er1 - kx ** 2 - ky ** 2).astype(self.cdtype) ** 0.5)
         kz_trn = np.conj((ur2 * er2 - kx ** 2 - ky ** 2).astype(self.cdtype) ** 0.5)
-        maxk = ky[0, 0] * kx[0, 0] * 4
 
-        m_vec, n_vec = np.meshgrid(m.astype(self.idtype), n.astype(self.idtype))
+        # m_vec, n_vec = np.meshgrid(m.astype(self.idtype), n.astype(self.idtype))
+        n_vec, m_vec = np.meshgrid(n.astype(self.idtype), m.astype(self.idtype))
 
         # Truncate k vectors
         shape = (np.abs(m_vec / self.device.p) ** (2 * gamma) + np.abs(n_vec / self.device.q) ** (2 * gamma)) <= 1
@@ -72,19 +78,19 @@ class RCWA:
         inxs = np.ravel_multi_index((non_zero_rows, non_zero_cols), shape.shape)
         n_nonzero = np.count_nonzero(shape)
 
-        kx = (kx + maxk) * shape
-        ky = (ky + maxk) * shape
-        kz_ref = (kz_ref + maxk) * shape
-        kz_trn = (kz_trn + maxk) * shape
+        kx[np.logical_not(shape)] = 0
+        ky[np.logical_not(shape)] = 0
+        kz_ref[np.logical_not(shape)] = 0
+        kz_trn[np.logical_not(shape)] = 0
 
         # Compute convolution matrices and truncate
         er_c_mat = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype)
         er_inv_mat = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype)
         delta_mat = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype)
 
-        nvx_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
-        nvy_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
-        nvxy_c = np.zeros((n_layers, n_nonzero, n_nonzero)) if self.apply_nv else None
+        nvx_c = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype) if self.apply_nv else None
+        nvy_c = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype) if self.apply_nv else None
+        nvxy_c = np.zeros((n_layers, n_nonzero, n_nonzero), dtype=self.cdtype) if self.apply_nv else None
 
         for i_layer in range(n_layers):
             er_temp = convmat(
@@ -108,10 +114,10 @@ class RCWA:
                 nvy_c[i_layer, :, :] = nvytemp[inxs, :][:, inxs]
                 nvxy_c[i_layer, :, :] = nvxytemp[inxs, :][:, inxs]
 
-        kx_mat = np.diag(kx[non_zero_rows, non_zero_cols] - maxk).astype(self.cdtype)
-        ky_mat = np.diag(ky[non_zero_rows, non_zero_cols] - maxk).astype(self.cdtype)
-        kz_ref_mat = np.diag(kz_ref[non_zero_rows, non_zero_cols] - maxk)
-        kz_trn_mat = np.diag(kz_trn[non_zero_rows, non_zero_cols] - maxk)
+        kx_mat = np.diag(kx[non_zero_rows, non_zero_cols]).astype(self.cdtype)
+        ky_mat = np.diag(ky[non_zero_rows, non_zero_cols]).astype(self.cdtype)
+        kz_ref_mat = np.diag(kz_ref[non_zero_rows, non_zero_cols])
+        kz_trn_mat = np.diag(kz_trn[non_zero_rows, non_zero_cols])
 
         # EMT RCWA
         delta = np.zeros(n_nonzero)

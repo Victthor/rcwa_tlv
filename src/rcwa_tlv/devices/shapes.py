@@ -2,7 +2,7 @@
 import numpy as np
 
 
-def add_circle(array: np.ndarray, center: tuple, radius: float, val: float) -> np.ndarray:
+def add_circle(array: np.ndarray, center: tuple, radius: float, val: float | complex) -> np.ndarray:
     """
     Add a circle with a given value to a 2D array.
 
