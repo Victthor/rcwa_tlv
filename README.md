@@ -53,4 +53,4 @@ result = rcwa()
 ```
 
 ## References:
-
+https://doi.org/10.1364/JOSA.71.000811

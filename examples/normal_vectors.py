@@ -4,8 +4,8 @@ import numpy as np
 from rcwa_tlv import RCWA, Device, Source
 from rcwa_tlv.devices.shapes import add_circle
 
-n_height = 400
-n_width = 800
+n_height = 200
+n_width = 400
 period_h = 450
 period_w = 900
 nm2pixels = n_width / period_w

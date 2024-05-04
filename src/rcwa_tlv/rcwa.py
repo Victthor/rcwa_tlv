@@ -16,7 +16,7 @@ class RCWA:
             gamma: float = 1.,
             apply_nv: bool = False,
             dtype: Literal['np.float32', 'np.float64'] = np.float32,
-            renormalize: bool = True,
+            renormalize: bool = False,
     ):
         self.source = source
         self.device = device
@@ -29,10 +29,7 @@ class RCWA:
         self.cdtype = np.complex128 if dtype == np.float64 else np.complex64
         self.idtype = np.int64 if dtype == np.float64 else np.int32
 
-        # if apply_nv:
-        #     raise NotImplementedError("NV is not yet implemented.")
-
-    def __call__(self, *args, apply_nv=None, **kwargs) -> dict:
+    def __call__(self, *args, apply_nv=None, verbose=True, **kwargs) -> dict:
         ur1 = self.device.ur1
         er1 = self.device.er1
         ur2 = self.device.ur2
@@ -132,30 +129,24 @@ class RCWA:
         # Initialize matrices
         i_mat = np.diag(np.ones(n_nonzero, dtype=self.cdtype))
         o_mat = np.diag(np.zeros(n_nonzero, dtype=self.cdtype))
-        a_mat = np.block([  # type:ignore
-            [i_mat, o_mat],
-            [o_mat, i_mat],
-            [
-                -(1j * kx_mat @ ky_mat) @ np.linalg.inv(ur1 * kz_ref_mat),
-                -(1j * (ky_mat ** 2 + kz_ref_mat ** 2)) @ np.linalg.inv(ur1 * kz_ref_mat)
-            ],
-            [
-                (1j * (kx_mat ** 2 + kz_ref_mat ** 2)) @ np.linalg.inv(ur1 * kz_ref_mat),
-                (1j * kx_mat @ ky_mat) @ np.linalg.inv(ur1 * kz_ref_mat)
-            ]
-        ])
-        b_mat = np.block([  # type:ignore
-            [i_mat, o_mat],
-            [o_mat, i_mat],
-            [
-                (1j * kx_mat @ ky_mat) @ np.linalg.inv(ur2 * kz_trn_mat),
-                (1j * (ky_mat ** 2 + kz_trn_mat ** 2)) @ np.linalg.inv(ur2 * kz_trn_mat)
-            ],
-            [
-                -(1j * (kx_mat ** 2 + kz_trn_mat ** 2)) @ np.linalg.inv(ur2 * kz_trn_mat),
-                -(1j * kx_mat @ ky_mat) @ np.linalg.inv(ur2 * kz_trn_mat)
-            ]
-        ])
+
+        # prepare mid-way calculations to save time
+        kxky_mat = kx_mat @ ky_mat
+        kykx_mat = ky_mat @ kx_mat
+        kxkx_mat = kx_mat @ kx_mat
+        kyky_mat = ky_mat @ ky_mat
+        j_kxky_mat = 1j * kxky_mat
+        kx_sqr_mat = kx_mat ** 2
+        ky_sqr_mat = ky_mat ** 2
+        kz_ref_sqr_mat = kz_ref_mat ** 2
+        kz_trn_sqr_mat = kz_trn_mat ** 2
+
+        a_mat = self._a_mat(
+            ur1, i_mat, o_mat, j_kxky_mat, kz_ref_mat, ky_sqr_mat, kx_sqr_mat, kz_ref_sqr_mat, verbose=verbose
+        )
+        b_mat = self._b_mat(
+            ur2, i_mat, o_mat, j_kxky_mat, kz_trn_mat, ky_sqr_mat, kx_sqr_mat, kz_trn_sqr_mat, verbose=verbose
+        )
 
         f_mat = np.zeros((4 * n_nonzero, 4 * n_nonzero, n_layers), dtype=self.cdtype)
         x_mat = np.zeros((2 * n_nonzero, 2 * n_nonzero, n_layers), dtype=self.cdtype)
@@ -176,18 +167,18 @@ class RCWA:
                     delta_nxy = delta_mat[i_layer] @ nvxy_c[i_layer]
                     q_mat[:, :, i_layer] = np.block([  # type:ignore
                         [
-                            kx_mat @ ky_mat - delta_nxy,
-                            er_c_mat[i_layer] - delta_mat[i_layer] @ nvy_c[i_layer] - kx_mat @ kx_mat
+                            kxky_mat - delta_nxy,
+                            er_c_mat[i_layer] - delta_mat[i_layer] @ nvy_c[i_layer] - kxkx_mat
                         ],
                         [
-                            ky_mat @ ky_mat - er_c_mat[i_layer] + delta_mat[i_layer] @ nvx_c[i_layer],
-                            -ky_mat @ kx_mat + delta_nxy
+                            kyky_mat - er_c_mat[i_layer] + delta_mat[i_layer] @ nvx_c[i_layer],
+                            -kykx_mat + delta_nxy
                         ]
                     ])
                 else:
                     q_mat[:, :, i_layer] = np.block([  # type:ignore
-                        [kx_mat @ ky_mat, er_c_mat[i_layer] - kx_mat @ kx_mat],
-                        [ky_mat @ ky_mat - er_c_mat[i_layer], -ky_mat @ kx_mat]
+                        [kxky_mat, er_c_mat[i_layer] - kxkx_mat],
+                        [kyky_mat - er_c_mat[i_layer], -kykx_mat]
                     ])
                 omega_2 = p_mat[:, :, i_layer] @ q_mat[:, :, i_layer]
                 lam, w_mat = np.linalg.eig(omega_2)
@@ -251,10 +242,23 @@ class RCWA:
 
         r[:, 0] = rxy[:n_nonzero]
         r[:, 1] = rxy[n_nonzero:]
-        r[:, 2] = -np.linalg.solve(kz_ref_mat, kx_mat @ r[:, 0] + ky_mat @ r[:, 1])
+
+        try:
+            r[:, 2] = -np.linalg.solve(kz_ref_mat, kx_mat @ r[:, 0] + ky_mat @ r[:, 1])
+        except np.linalg.linalg.LinAlgError:
+            if verbose:
+                print('failed: -np.linalg.solve(kz_ref_mat, kx_mat @ r[:, 0] + ky_mat @ r[:, 1]), trying lstsq')
+            r[:, 2] = -np.linalg.lstsq(kz_ref_mat, kx_mat @ r[:, 0] + ky_mat @ r[:, 1], rcond=None)[0]
+
         t[:, 0] = txy[:n_nonzero]
         t[:, 1] = txy[n_nonzero:]
-        t[:, 2] = -np.linalg.solve(kz_trn_mat, kx_mat @ t[:, 0] + ky_mat @ t[:, 1])
+
+        try:
+            t[:, 2] = -np.linalg.solve(kz_trn_mat, kx_mat @ t[:, 0] + ky_mat @ t[:, 1])
+        except np.linalg.linalg.LinAlgError:
+            if verbose:
+                print('failed: -np.linalg.solve(kz_trn_mat, kx_mat @ t[:, 0] + ky_mat @ t[:, 1]), trying lstsq')
+            t[:, 2] = -np.linalg.lstsq(kz_trn_mat, kx_mat @ t[:, 0] + ky_mat @ t[:, 1], rcond=None)[0]
 
         # Compute diffraction efficiency
         r_squared = np.abs(r[:, 0]) ** 2 + np.abs(r[:, 1]) ** 2 + np.abs(r[:, 2]) ** 2
@@ -284,13 +288,166 @@ class RCWA:
 
         return self.result
 
+    @staticmethod
+    def _a_mat(ur1, i_mat, o_mat, j_kxky_mat, kz_ref_mat, ky_sqr_mat, kx_sqr_mat, kz_ref_sqr_mat, verbose=True):
+        """
+        a_mat = np.block([  # type:ignore
+            [i_mat, o_mat],
+            [o_mat, i_mat],
+            [
+                -(1j * kx_mat @ ky_mat) @ np.linalg.inv(ur1 * kz_ref_mat),
+                -(1j * (ky_mat ** 2 + kz_ref_mat ** 2)) @ np.linalg.inv(ur1 * kz_ref_mat)
+            ],
+            [
+                (1j * (kx_mat ** 2 + kz_ref_mat ** 2)) @ np.linalg.inv(ur1 * kz_ref_mat),
+                (1j * kx_mat @ ky_mat) @ np.linalg.inv(ur1 * kz_ref_mat)
+            ]
+        ])
+        :param ur1:
+        :param i_mat:
+        :param o_mat:
+        :param j_kxky_mat:
+        :param kz_ref_mat:
+        :param ky_sqr_mat:
+        :param kx_sqr_mat:
+        :param kz_ref_sqr_mat:
+        :param verbose:
+        :return:
+        """
+        ur1_kz_ref_mat = ur1 * kz_ref_mat
+
+        try:
+            kz_inv_mat = np.linalg.inv(ur1_kz_ref_mat)
+            j_kxky_kz_inv_mat = j_kxky_mat @ kz_inv_mat
+
+            a_mat = np.block([  # type:ignore
+                [i_mat, o_mat],
+                [o_mat, i_mat],
+                [-j_kxky_kz_inv_mat, -(1j * (ky_sqr_mat + kz_ref_sqr_mat)) @ kz_inv_mat],
+                [(1j * (kx_sqr_mat + kz_ref_sqr_mat)) @ kz_inv_mat, j_kxky_kz_inv_mat]
+            ])
+        except np.linalg.linalg.LinAlgError:
+            try:
+                if verbose:
+                    print(f'direct inversion of ur1 * kz_ref_mat failed, trying to use np.linalg.solve...')
+
+                a_mat = np.block([  # type:ignore
+                    [i_mat, o_mat],
+                    [o_mat, i_mat],
+                    [
+                        np.linalg.solve(ur1_kz_ref_mat.T, -j_kxky_mat.T).T,
+                        np.linalg.solve(ur1_kz_ref_mat.T, -(1j * (ky_sqr_mat + kz_ref_sqr_mat)).T).T
+                    ],
+                    [
+                        np.linalg.solve(ur1_kz_ref_mat.T, (1j * (kx_sqr_mat + kz_ref_sqr_mat)).T).T,
+                        np.linalg.solve(ur1_kz_ref_mat.T, j_kxky_mat.T).T
+                    ]
+                ])
+            except np.linalg.linalg.LinAlgError:
+                try:
+                    if verbose:
+                        print(f'np.linalg.solve failed, trying np.linalg.lstsq...')
+                    a_mat = np.block([  # type:ignore
+                        [i_mat, o_mat],
+                        [o_mat, i_mat],
+                        [
+                            np.linalg.lstsq(ur1_kz_ref_mat.T, -j_kxky_mat.T, rcond=None)[0].T,
+                            np.linalg.lstsq(ur1_kz_ref_mat.T, -(1j * (ky_sqr_mat + kz_ref_sqr_mat)).T, rcond=None)[0].T
+                        ],
+                        [
+                            np.linalg.lstsq(ur1_kz_ref_mat.T, (1j * (kx_sqr_mat + kz_ref_sqr_mat)).T, rcond=None)[0].T,
+                            np.linalg.lstsq(ur1_kz_ref_mat.T, j_kxky_mat.T, rcond=None)[0].T
+                        ]
+                    ])
+                except np.linalg.linalg.LinAlgError:
+                    raise np.linalg.linalg.LinAlgError('all methods to evaluate a_mat failed')
+
+        return a_mat
+
+    @staticmethod
+    def _b_mat(ur2, i_mat, o_mat, j_kxky_mat, kz_trn_mat, ky_sqr_mat, kx_sqr_mat, kz_trn_sqr_mat, verbose=True):
+        """
+        b_mat = np.block([  # type:ignore
+            [i_mat, o_mat],
+            [o_mat, i_mat],
+            [
+                j_kxky_mat @ np.linalg.inv(ur2 * kz_trn_mat),
+                (1j * (ky_sqr_mat + kz_trn_sqr_mat)) @ np.linalg.inv(ur2 * kz_trn_mat)
+            ],
+            [
+                -(1j * (kx_sqr_mat + kz_trn_sqr_mat)) @ np.linalg.inv(ur2 * kz_trn_mat),
+                -j_kxky_mat @ np.linalg.inv(ur2 * kz_trn_mat)
+            ]
+        ])
+        :param ur2:
+        :param i_mat:
+        :param o_mat:
+        :param j_kxky_mat:
+        :param kz_trn_mat:
+        :param ky_sqr_mat:
+        :param kx_sqr_mat:
+        :param kz_trn_sqr_mat:
+        :param verbose:
+        :return:
+        """
+
+        ur2_kz_trn_mat = ur2 * kz_trn_mat
+
+        try:
+            kz_inv_mat = np.linalg.inv(ur2_kz_trn_mat)
+            j_kxky_kz_inv_mat = j_kxky_mat @ kz_inv_mat
+
+            b_mat = np.block([  # type:ignore
+                [i_mat, o_mat],
+                [o_mat, i_mat],
+                [j_kxky_kz_inv_mat, (1j * (ky_sqr_mat + kz_trn_sqr_mat)) @ kz_inv_mat],
+                [-(1j * (kx_sqr_mat + kz_trn_sqr_mat)) @ kz_inv_mat, -j_kxky_kz_inv_mat]
+            ])
+        except np.linalg.linalg.LinAlgError:
+            try:
+                if verbose:
+                    print(f'direct inversion of ur1 * kz_ref_mat failed, trying to use np.linalg.solve...')
+
+                b_mat = np.block([  # type:ignore
+                    [i_mat, o_mat],
+                    [o_mat, i_mat],
+                    [
+                        np.linalg.solve(ur2_kz_trn_mat.T, j_kxky_mat.T).T,
+                        np.linalg.solve(ur2_kz_trn_mat.T, (1j * (ky_sqr_mat + kz_trn_sqr_mat)).T).T
+                    ],
+                    [
+                        np.linalg.solve(ur2_kz_trn_mat.T, -(1j * (kx_sqr_mat + kz_trn_sqr_mat)).T).T,
+                        np.linalg.solve(ur2_kz_trn_mat.T, -j_kxky_mat.T).T
+                    ]
+                ])
+            except np.linalg.linalg.LinAlgError:
+                try:
+                    if verbose:
+                        print(f'np.linalg.solve failed, trying np.linalg.lstsq...')
+                    b_mat = np.block([  # type:ignore
+                        [i_mat, o_mat],
+                        [o_mat, i_mat],
+                        [
+                            np.linalg.lstsq(ur2_kz_trn_mat.T, j_kxky_mat.T, rcond=None)[0].T,
+                            np.linalg.lstsq(ur2_kz_trn_mat.T, (1j * (ky_sqr_mat + kz_trn_sqr_mat)).T, rcond=None)[0].T
+                        ],
+                        [
+                            np.linalg.lstsq(ur2_kz_trn_mat.T, -(1j * (kx_sqr_mat + kz_trn_sqr_mat)).T, rcond=None)[0].T,
+                            np.linalg.lstsq(ur2_kz_trn_mat.T, -j_kxky_mat.T, rcond=None)[0].T
+                        ]
+                    ])
+                except np.linalg.linalg.LinAlgError:
+                    raise np.linalg.linalg.LinAlgError('all methods to evaluate b_mat failed')
+
+        return b_mat
+
 
 if __name__ == '__main__':
     from time import perf_counter
     from rcwa_tlv.devices.shapes import add_circle
 
-    n_height = 400
-    n_width = 400
+    n_height = 800
+    n_width = 800
     period = 900
     nm2pixels = n_width / period
 
@@ -314,19 +471,20 @@ if __name__ == '__main__':
         'length_z': 54,
     }
 
-    layers = [layer_1, layer_2]
-    add_circle(layers[0]['er'], (n_height // 2, n_width // 2), 300 * nm2pixels, er1)
-    add_circle(layers[1]['er'], (n_height // 4, n_width // 2), 200 * nm2pixels, er1)
+    # layers = [layer_1, layer_2, layer_2, layer_2, layer_1, layer_2, layer_2, layer_2]
+    layers = [layer_1]
+    add_circle(layers[0]['er'], (n_height // 2, n_width // 2), 300 * nm2pixels, 36.)
+    # add_circle(layers[1]['er'], (n_height // 4, n_width // 2), 200 * nm2pixels, er1)
 
-    device_1 = Device(layers, period_x=period, period_y=period, er1=1.445 ** 2, ur1=1.0, er2=1.0, ur2=1.0, p=11, q=11)
-    source_1 = Source(0.0, 0.0, 700, 1., 0.)
+    device_1 = Device(layers, period_x=period, period_y=period, er1=1.445 ** 2, ur1=1.0, er2=1.0, ur2=1.0, p=9, q=9)
+    source_1 = Source(0.0, 0.0, 400, 1., 0.)
 
-    rcwa = RCWA(device_1, source_1, gamma=0.7, apply_nv=False, dtype=np.float32)
+    rcwa = RCWA(device_1, source_1, gamma=1.0, apply_nv=True, dtype=np.float32)
 
     t1 = perf_counter()
-    rcwa()
+    result = rcwa()
     t2 = perf_counter()
 
-    print(f'rcwa time: {t2 - t1:0.4f}')
+    print(f'rcwa time: {t2 - t1:0.4f}, r: {result["tot_r"]}, t: {result["tot_t"]}')
 
     b = 1

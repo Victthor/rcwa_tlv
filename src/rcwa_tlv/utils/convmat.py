@@ -38,15 +38,15 @@ def convmat(matrix_in, p, q=None, dtype=np.complex128):
 
     # x domain:
     x = np.arange(p0, p0 - p, -1)
-    x = np.tile(x[np.newaxis, :], (1, p))
+    x = np.tile(x[np.newaxis, :], (1, q))
     xp = np.arange(p)
     x = x + xp[:, np.newaxis]
-    x = np.tile(x, (p, 1))
+    x = np.tile(x, (q, 1))
 
     # y domain:
     a = np.arange(q)
     y = toeplitz(a, -a)
-    y = np.repeat(np.repeat(y, q, axis=0), q, axis=1) + q0
+    y = np.repeat(np.repeat(y, p, axis=0), p, axis=1) + q0
 
     conv_matrix = matrix_in_fft[y, x]
 
